@@ -1,0 +1,2365 @@
+{
+  "name": "Meta Inbox Customer Service Automation",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "\n// Parse Meta webhook payloads for Messenger, Instagram and WhatsApp.\n// Emit one item per real inbound customer message with a \"status\" field:\n//   valid  -> continue processing\n//   ignore -> business-sent / delivery / read / empty / unsupported (dropped)\n//   error  -> incomplete / malformed webhook data (routed to Error Handler)\nconst out = [];\n\nfunction pushError(reason, raw) {\n  out.push({ json: { status: 'error', error_reason: reason, failed_node: 'Validate Event', raw_event: raw } });\n}\n\nfor (const item of $input.all()) {\n  const body = (item.json && item.json.body) ? item.json.body : item.json;\n  if (!body || typeof body !== 'object') { pushError('Meta webhook body missing or not an object', item.json); continue; }\n\n  const object = body.object || '';\n  const entries = Array.isArray(body.entry) ? body.entry : [];\n  if (entries.length === 0) { pushError('Webhook contained no entry array', body); continue; }\n\n  for (const entry of entries) {\n    // ---- WhatsApp Business ----\n    if (Array.isArray(entry.changes)) {\n      for (const change of entry.changes) {\n        const value = change.value || {};\n        // delivery / read receipts and status updates -> ignore\n        if (Array.isArray(value.statuses) && value.statuses.length) {\n          out.push({ json: { status: 'ignore', reason: 'whatsapp status update' } });\n          continue;\n        }\n        const messages = Array.isArray(value.messages) ? value.messages : [];\n        const contacts = Array.isArray(value.contacts) ? value.contacts : [];\n        for (const m of messages) {\n          const text = (m.text && m.text.body) ? String(m.text.body).trim() : '';\n          if (m.type && m.type !== 'text') { out.push({ json: { status: 'ignore', reason: 'unsupported whatsapp message type: ' + m.type } }); continue; }\n          if (!text) { out.push({ json: { status: 'ignore', reason: 'empty whatsapp message' } }); continue; }\n          const contact = contacts[0] || {};\n          const mid = m.id;\n          const from = m.from;\n          if (!mid || !from) { pushError('WhatsApp message missing id or from', m); continue; }\n          out.push({ json: {\n            status: 'valid',\n            raw_channel: 'whatsapp',\n            message_id: String(mid),\n            customer_id: String(from),\n            customer_name: (contact.profile && contact.profile.name) ? contact.profile.name : '',\n            customer_message: text,\n            conversation_id: String(from),\n            message_timestamp: m.timestamp ? new Date(Number(m.timestamp) * 1000).toISOString() : new Date().toISOString(),\n          } });\n        }\n      }\n      continue;\n    }\n\n    // ---- Messenger (object=page) & Instagram (object=instagram) ----\n    const messaging = Array.isArray(entry.messaging) ? entry.messaging : [];\n    if (messaging.length === 0) { out.push({ json: { status: 'ignore', reason: 'entry without messaging array (unsupported event type)' } }); continue; }\n\n    for (const ev of messaging) {\n      if (ev.delivery) { out.push({ json: { status: 'ignore', reason: 'delivery notification' } }); continue; }\n      if (ev.read) { out.push({ json: { status: 'ignore', reason: 'read receipt' } }); continue; }\n      const msg = ev.message;\n      if (!msg) { out.push({ json: { status: 'ignore', reason: 'unsupported event type (no message)' } }); continue; }\n      if (msg.is_echo) { out.push({ json: { status: 'ignore', reason: 'business-sent message (echo)' } }); continue; }\n      const text = msg.text ? String(msg.text).trim() : '';\n      if (!text) { out.push({ json: { status: 'ignore', reason: 'empty or non-text message' } }); continue; }\n      const senderId = ev.sender && ev.sender.id;\n      const mid = msg.mid;\n      if (!senderId || !mid) { pushError('Messenger/IG event missing sender.id or message.mid', ev); continue; }\n      const channel = object === 'instagram' ? 'instagram' : 'messenger';\n      out.push({ json: {\n        status: 'valid',\n        raw_channel: channel,\n        message_id: String(mid),\n        customer_id: String(senderId),\n        customer_name: '',\n        customer_message: text,\n        conversation_id: String(senderId),\n        message_timestamp: ev.timestamp ? new Date(Number(ev.timestamp)).toISOString() : new Date().toISOString(),\n      } });\n    }\n  }\n}\n\nif (out.length === 0) out.push({ json: { status: 'ignore', reason: 'no processable events' } });\nreturn out;\n"
+      },
+      "id": "94242b54-13a3-4cb4-8756-155e51bff21b",
+      "name": "Validate Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        272,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.status }}",
+                    "rightValue": "valid",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "f4f42c8b-a0e5-4d9c-a52e-5a11202de96a"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "valid"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.status }}",
+                    "rightValue": "error",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "66609e78-85d0-4037-aa39-db68eda1eb73"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "error"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "none"
+        }
+      },
+      "id": "f6c32459-f549-4619-b422-81c91d3d2d09",
+      "name": "Ignore Business-Sent and Duplicate Messages",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        496,
+        704
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "rowNotExists",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "CONFIGURE_MESSAGE_LOG_DATA_TABLE_ID",
+          "cachedResultName": "message_log"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "message_id",
+              "keyValue": "={{ $json.message_id }}"
+            }
+          ]
+        }
+      },
+      "id": "375c22ce-0e76-4a0f-bac3-537eabc29c63",
+      "name": "Dedup by message_id",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        656,
+        528
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const j = $json;\n\nconst map = {\n  messenger: 'Messenger',\n  instagram: 'Instagram',\n  whatsapp: 'WhatsApp'\n};\n\n// Support both:\n// - original webhook field names\n// - Store message_id Data Table output field names\nconst rawChannel = j.raw_channel || j.channel || '';\n\nconst channel =\n  map[String(rawChannel).toLowerCase()] || 'Unknown';\n\nreturn {\n  json: {\n    customer_message:\n      j.customer_message || j.original_message || '',\n\n    customer_name:\n      j.customer_name || '',\n\n    customer_id:\n      j.customer_id,\n\n    channel,\n\n    conversation_id:\n      j.conversation_id,\n\n    message_id:\n      j.message_id,\n\n    message_timestamp:\n      j.message_timestamp || j.event_timestamp\n  }\n};"
+      },
+      "id": "101112f2-1bf5-4338-ab73-80878a76615c",
+      "name": "Normalize Channel and Message Fields",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1104,
+        544
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://CONFIGURE_CMS_API_HOST/api/v1/cms/helpcenters",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "189b0200-939b-4727-b0b9-9015b538f3dd",
+      "name": "Fetch Help Center Content",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1568,
+        336
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "url": "https://CONFIGURE_CMS_API_HOST/api/v1/cms/content-by-type/page",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "6d1914bc-ad0a-41ff-8912-b16807a55edd",
+      "name": "Fetch Approved Policy Pages",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1616,
+        832
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nconst j = $json || {};\nconst err = j.error || {};\nconst failed_node = (err.node && err.node.name) || j.failed_node || 'unknown';\nconst error_message = err.message || j.error_reason || (typeof err === 'string' ? err : JSON.stringify(err)) || 'Unknown workflow error';\n\n// Try to recover context if present\nconst channel = j.channel || 'Unknown';\nconst conversation_id = j.conversation_id || (j.raw_event ? '' : '') || 'unknown';\n\nconst title = '[Meta Workflow Error] ' + channel + ' \\u2014 ' + conversation_id;\nconst desc =\n  'A workflow error occurred while processing a Meta customer-service message.\\n\\n' +\n  'Failed node:\\n' + failed_node + '\\n\\n' +\n  'Error message:\\n' + error_message + '\\n\\n' +\n  'Channel:\\n' + channel + '\\n\\n' +\n  'Conversation ID:\\n' + conversation_id + '\\n\\n' +\n  'Customer ID:\\n' + (j.customer_id || 'unknown') + '\\n\\n' +\n  'Message ID:\\n' + (j.message_id || 'unknown') + '\\n\\n' +\n  'Original message:\\n' + (j.customer_message || 'unavailable') + '\\n\\n' +\n  'Execution ID:\\n' + $execution.id;\n\nreturn { json: {\n  channel,\n  conversation_id,\n  customer_id: j.customer_id || 'unknown',\n  message_id: j.message_id || ('err_' + $execution.id),\n  customer_message: j.customer_message || '',\n  message_timestamp: j.message_timestamp || new Date().toISOString(),\n  error_message,\n  failed_node,\n  error_task_title: title,\n  error_task_description: desc,\n} };\n"
+      },
+      "id": "ff3ee0f5-5ff2-4ac6-b9e1-2d4fd2519591",
+      "name": "Error Handler",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4544,
+        608
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "2ad09d1b-cbca-4416-b6c7-836f28f5baa0",
+      "name": "Merge CMS Content",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1792,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all().map(i => i.json);\n\nfunction stripHtml(html) {\n  return String(html || '')\n    .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')\n    .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')\n    .replace(/<[^>]+>/g, ' ')\n    .replace(/&nbsp;/gi, ' ')\n    .replace(/&amp;/gi, '&')\n    .replace(/&quot;/gi, '\"')\n    .replace(/&#39;/gi, \"'\")\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\nconst results = [];\n\nfunction scan(obj) {\n  if (!obj) return;\n\n  if (Array.isArray(obj)) {\n    for (const item of obj) {\n      scan(item);\n    }\n    return;\n  }\n\n  if (typeof obj !== 'object') return;\n\n  // This matches your CMS post structure:\n  // title + content + type\n  if (obj.title && obj.content) {\n    const text = stripHtml(obj.content);\n\n    if (text) {\n      results.push({\n        source_title: obj.title,\n        source_url: obj.url || obj.link || obj.permalink || '',\n        source_text: text,\n        source_type: obj.type || 'cms'\n      });\n    }\n  }\n\n  // Continue looking through nested objects such as:\n  // selling > About Selling > category > posts\n  for (const value of Object.values(obj)) {\n    if (value && typeof value === 'object') {\n      scan(value);\n    }\n  }\n}\n\nfor (const item of items) {\n  scan(item);\n}\n\nif (results.length === 0) {\n  return [{\n    json: {\n      __no_content: true,\n      source_title: '',\n      source_url: '',\n      source_text: '',\n      source_type: ''\n    }\n  }];\n}\n\nreturn results.map(r => ({\n  json: r\n}));"
+      },
+      "id": "42dcd2ba-6a94-484a-adcd-b3a81a04eda8",
+      "name": "Clean and Prepare Content",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2016,
+        224
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Retrieve the most relevant APPROVED CMS sources for each customer message.\n// Goal:\n// 1. Strongly prioritize title relevance.\n// 2. Prefer sources whose source_type matches the user's intent.\n// 3. Penalize conflicting source types (e.g. buying source for a selling question).\n// 4. Return only 1 source when there is a very strong match.\n// 5. Otherwise return maximum 2 sources.\n\nconst chunks = $input.all()\n  .map(i => i.json)\n  .filter(c =>\n    c &&\n    c.source_text &&\n    String(c.source_text).trim() !== ''\n  );\n\nconst customers = $('Normalize Channel and Message Fields')\n  .all()\n  .map(i => i.json);\n\nconst STOP = new Set([\n  'the', 'a', 'an', 'how', 'do', 'i', 'to', 'on', 'in', 'of',\n  'and', 'or', 'is', 'are', 'my', 'can', 'you', 'for', 'with',\n  'what', 'when', 'where', 'me', 'it', 'this', 'that', 'please',\n  'hi', 'hello'\n]);\n\nfunction normalizeWord(word) {\n  let w = String(word || '').toLowerCase();\n\n  if (['selling', 'sells', 'sold', 'seller'].includes(w)) return 'sell';\n  if (['listing', 'listed', 'lists', 'listings'].includes(w)) return 'list';\n\n  if (['buying', 'buys', 'bought', 'buyer'].includes(w)) return 'buy';\n\n  if (['items'].includes(w)) return 'item';\n  if (['products'].includes(w)) return 'product';\n\n  if (['shipping', 'shipped', 'ships'].includes(w)) return 'ship';\n\n  if (['authentication', 'authenticate', 'authenticated', 'authenticating'].includes(w)) {\n    return 'authentic';\n  }\n\n  if (['sizing', 'sizes', 'sized'].includes(w)) return 'size';\n\n  if (['payments', 'paid', 'paying'].includes(w)) return 'payment';\n\n  if (['returns', 'returned'].includes(w)) return 'return';\n\n  if (['refunds', 'refunded'].includes(w)) return 'refund';\n\n  return w;\n}\n\nfunction tokens(s) {\n  return String(s || '')\n    .toLowerCase()\n    .replace(/[^a-z0-9\\s]/g, ' ')\n    .split(/\\s+/)\n    .map(normalizeWord)\n    .filter(w => w && w.length > 2 && !STOP.has(w));\n}\n\nfunction detectIntent(message) {\n  const text = String(message || '').toLowerCase();\n\n  if (/\\b(sell|selling|seller|list|listing)\\b/.test(text)) return 'selling';\n  if (/\\b(buy|buying|buyer|purchase|checkout)\\b/.test(text)) return 'buying';\n  if (/\\b(ship|shipping|delivery|tracking)\\b/.test(text)) return 'shipping';\n  if (/\\b(authentic|authentication|authenticate|certificate|certification|gia|igi)\\b/.test(text)) return 'authentication';\n  if (/\\b(size|sizing|resize|resizing|ring size)\\b/.test(text)) return 'sizing';\n  if (/\\b(payment|pay|checkout)\\b/.test(text)) return 'payment';\n\n  return 'general';\n}\n\nfunction sourceMatchesIntent(sourceType, intent) {\n  const type = String(sourceType || '').toLowerCase();\n\n  if (intent === 'selling') return type.includes('selling');\n  if (intent === 'buying') return type.includes('buying');\n  if (intent === 'shipping') return type.includes('shipping');\n  if (intent === 'authentication') {\n    return (\n      type.includes('authentication') ||\n      type.includes('general')\n    );\n  }\n  if (intent === 'sizing') {\n    return (\n      type.includes('sizing') ||\n      type.includes('general')\n    );\n  }\n\n  return false;\n}\n\nfunction sourceConflictsWithIntent(sourceType, intent) {\n  const type = String(sourceType || '').toLowerCase();\n\n  if (intent === 'selling' && type.includes('buying')) return true;\n  if (intent === 'buying' && type.includes('selling')) return true;\n\n  return false;\n}\n\nconst out = [];\n\nfor (const cust of customers) {\n  const message = String(cust.customer_message || '');\n  const qTokens = [...new Set(tokens(message))];\n  const intent = detectIntent(message);\n\n  const scored = chunks\n    .map(c => {\n      const title = String(c.source_title || '');\n      const text = String(c.source_text || '');\n      const sourceType = String(c.source_type || '');\n\n      const titleTokens = [...new Set(tokens(title))];\n      const textTokens = new Set(tokens(text));\n\n      let score = 0;\n      let titleMatches = 0;\n\n      // -------------------------\n      // Token relevance\n      // -------------------------\n      for (const token of qTokens) {\n        // Title matches are much more important.\n        if (titleTokens.includes(token)) {\n          score += 6;\n          titleMatches += 1;\n        }\n\n        // Body matches still matter, but much less.\n        if (textTokens.has(token)) {\n          score += 1;\n        }\n      }\n\n      // -------------------------\n      // Intent / source-type match\n      // -------------------------\n      if (sourceMatchesIntent(sourceType, intent)) {\n        score += 10;\n      }\n\n      if (sourceConflictsWithIntent(sourceType, intent)) {\n        score -= 12;\n      }\n\n      // -------------------------\n      // Strong intent/title boosts\n      // -------------------------\n      const titleLower = title.toLowerCase();\n\n      if (\n        intent === 'selling' &&\n        /\\b(how.*sell|sell.*platform|selling.*platform)\\b/.test(titleLower)\n      ) {\n        score += 15;\n      }\n\n      if (\n        intent === 'buying' &&\n        /\\b(how.*buy|buy.*platform|buying.*platform)\\b/.test(titleLower)\n      ) {\n        score += 15;\n      }\n\n      if (\n        intent === 'shipping' &&\n        /\\b(ship|shipping|delivery)\\b/.test(titleLower)\n      ) {\n        score += 10;\n      }\n\n      if (\n        intent === 'authentication' &&\n        /\\b(authentic|authentication|certificate|gia|igi)\\b/.test(titleLower)\n      ) {\n        score += 10;\n      }\n\n      if (\n        intent === 'sizing' &&\n        /\\b(size|sizing|resize|resizing)\\b/.test(titleLower)\n      ) {\n        score += 10;\n      }\n\n      const titleMatchRatio =\n        qTokens.length > 0 ? titleMatches / qTokens.length : 0;\n\n      return {\n        c,\n        score,\n        titleMatches,\n        titleMatchRatio\n      };\n    })\n    .filter(x => x.score > 0)\n    .sort((a, b) => b.score - a.score);\n\n  let selected = [];\n\n  if (scored.length > 0) {\n    const best = scored[0];\n\n    // If one source is an excellent title match,\n    // send ONLY that source to the AI.\n    const strongBestMatch =\n      best.score >= 20 &&\n      best.titleMatchRatio >= 0.5;\n\n    if (strongBestMatch) {\n      selected = [best.c];\n    } else {\n      // Otherwise allow at most 2 genuinely relevant sources.\n      const second = scored[1];\n\n      selected = [best.c];\n\n      if (\n        second &&\n        second.score >= 8 &&\n        second.score >= best.score * 0.6\n      ) {\n        selected.push(second.c);\n      }\n    }\n  }\n\n  const sources_text = selected\n    .map((c, i) =>\n      'SOURCE ' + (i + 1) + ':\\n' +\n      'Title: ' + (c.source_title || '') + '\\n' +\n      'URL: ' + (c.source_url || '') + '\\n' +\n      'Type: ' + (c.source_type || '') + '\\n' +\n      'Content: ' + (c.source_text || '')\n    )\n    .join('\\n\\n');\n\n  out.push({\n    json: {\n      ...cust,\n\n      retrieval_intent: intent,\n\n      sources_json: JSON.stringify(selected),\n\n      sources_text:\n        sources_text || 'NO APPROVED SOURCES FOUND',\n\n      candidate_source_titles:\n        selected.map(c => c.source_title),\n\n      candidate_source_urls:\n        selected.map(c => c.source_url),\n\n      has_candidate_sources:\n        selected.length > 0\n    }\n  });\n}\n\nreturn out;"
+      },
+      "id": "3aaf7ba6-1ed2-4bb0-b6fc-813dfc4805e2",
+      "name": "Retrieve Relevant Approved Sources",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2240,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Customer channel: {{ $json.channel }}\nCustomer message:\n\"\"\"\n{{ $json.customer_message }}\"\"\"\n\nAPPROVED SOURCES (the ONLY knowledge you may use):\n{{ $json.sources_text }}\n",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "You are a customer-service triage and reply assistant for messages from Facebook Messenger, Instagram DM and WhatsApp Business.\n\nYou MUST return ONLY structured JSON matching the schema.\n\nCORE RULES:\n- Answer ONLY using the APPROVED SOURCES provided in the prompt. NEVER answer from your own memory or invent the organization's policies.\n- If the answer is not fully supported by an approved source, you MUST escalate.\n- Never auto-reply to account-specific or transactional questions.\n\nDECISION must be AUTO_REPLY or ESCALATE.\n\nAUTO_REPLY is allowed ONLY for these topics AND only when a fully-supporting approved source exists:\n  * General how-to-buy questions\n  * General how-to-sell questions\n  * Authentication overview\n  * Sizing and resizing guidance\n  * General shipping information\n\nALWAYS ESCALATE (set decision=ESCALATE, is_sensitive/appropriate flags): refunds, returns requiring review, disputes, chargebacks, order status, tracking, missing/delayed orders, payout status, seller payment status, cancellation requests, legal matters, complaints, angry customers, fraud allegations, authentication disputes, account access, privacy requests, price negotiation, discount requests, any question needing live customer/account/payment/order/inventory/transaction data, unclear questions, unsupported questions, questions with no approved source, questions with conflicting sources.\n\nCONFIDENCE: intent_confidence is 0-100. Only AUTO_REPLY when intent_confidence >= 90.\n\nsource_support_level must be one of FULL, PARTIAL, NONE, CONFLICTING. Only FULL permits AUTO_REPLY.\nsource_found is true only if at least one approved source directly supports the answer.\nis_allowlisted is true only if the topic is in the allowed auto-reply topic list AND is not sensitive.\nsource_titles and source_urls must be arrays drawn ONLY from the approved sources actually used (empty when escalating with no source).\n\nWhen escalating: customer_reply should be empty; set send_customer_reply=true to send a neutral acknowledgement (true for normal escalations and complaints). Provide escalation_reason, ai_summary, recommended_staff_action and clickup_task_title.\nWhen AUTO_REPLY: customer_reply is the full answer citing only approved info; send_customer_reply=true.\n\nIf a message contains multiple questions and any one requires human review, escalate the ENTIRE message.\nWhen uncertain, ESCALATE.\n\nREPLY STYLE RULES:\n\n- Answer only the customer's current question.\n- Do not summarize the entire source.\n- Use the minimum information needed to answer clearly.\n- Prefer 2-4 short sentences.\n- Maximum 90 words unless the customer explicitly asks for detailed steps.\n- Lead with the direct answer first.\n- Do not include secondary processes, edge cases, payment details, deposit rules, authentication timelines, shipping deadlines, or other downstream steps unless they are directly required to answer the customer's question.\n- If the approved source contains multiple options, briefly explain the main options without reproducing every detail.\n- Do not invent or add information outside the approved sources.\n- Keep the tone friendly, natural and conversational for Messenger/Instagram."
+        }
+      },
+      "id": "1c5ea5e8-eecb-458c-922f-6a417550e79c",
+      "name": "AI Classifier and Reply Generator",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        2464,
+        224
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-5",
+          "mode": "list",
+          "cachedResultName": "gpt-5"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "id": "566c709f-fa7c-4924-8a4c-4766b4bc4ec1",
+      "name": "OpenAI Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        2368,
+        448
+      ]
+    },
+    {
+      "parameters": {
+        "jsonSchemaExample": "{\"decision\":\"AUTO_REPLY\",\"intent\":\"how_to_buy\",\"topic\":\"General how-to-buy questions\",\"intent_confidence\":95,\"is_allowlisted\":true,\"is_sensitive\":false,\"source_found\":true,\"source_support_level\":\"FULL\",\"customer_reply\":\"Here is how you can buy on the platform ...\",\"source_titles\":[\"How to buy on the platform\"],\"source_urls\":[\"https://example.com/help/how-to-buy\"],\"escalation_reason\":\"\",\"ai_summary\":\"Customer asked a general how-to-buy question fully covered by an approved source.\",\"recommended_staff_action\":\"\",\"clickup_task_title\":\"\",\"send_customer_reply\":true}"
+      },
+      "id": "7a633986-9882-4e90-a204-911bad6c04a0",
+      "name": "Classification Schema",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        2608,
+        448
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const ai = ($json && $json.output) ? $json.output : $json;\nconst cust = $('Retrieve Relevant Approved Sources').item.json;\n\nfunction asArr(v) { return Array.isArray(v) ? v : (v ? [v] : []); }\nfunction num(v) { const n = Number(v); return isNaN(n) ? 0 : n; }\n\nlet valid = true;\nconst problems = [];\n\nif (!ai || typeof ai !== 'object') {\n  valid = false;\n  problems.push('AI output missing/invalid');\n}\n\nconst decision = ai && ai.decision ? String(ai.decision) : '';\n\nif (decision !== 'AUTO_REPLY' && decision !== 'ESCALATE') {\n  valid = false;\n  problems.push('invalid decision');\n}\n\nconst intent_confidence = num(ai && ai.intent_confidence);\nconst is_allowlisted = !!(ai && ai.is_allowlisted);\nconst is_sensitive = !!(ai && ai.is_sensitive);\nconst source_found = !!(ai && ai.source_found);\nconst support = ai && ai.source_support_level\n  ? String(ai.source_support_level)\n  : 'NONE';\n\nconst customer_reply = ai && ai.customer_reply\n  ? String(ai.customer_reply)\n  : '';\n\nconst source_titles = asArr(ai && ai.source_titles);\n\nconst source_urls = asArr(ai && ai.source_urls)\n  .filter(u => u && String(u).indexOf('http') === 0);\n\n// Auto-reply gate: ALL required safety conditions must pass.\n// A source URL is NOT required as long as approved source content was found\n// and the AI confirms FULL support.\nconst auto_reply_ok =\n  valid &&\n  decision === 'AUTO_REPLY' &&\n  intent_confidence >= 90 &&\n  is_allowlisted === true &&\n  is_sensitive === false &&\n  source_found === true &&\n  support === 'FULL' &&\n  customer_reply.trim().length > 0;\n\nconst final_route = auto_reply_ok ? 'AUTO_REPLY' : 'ESCALATE';\n\nreturn {\n  json: Object.assign({}, cust, {\n    ai_valid: valid,\n    validation_problems: problems.join('; '),\n    decision: decision || 'ESCALATE',\n    intent: (ai && ai.intent) || 'unknown',\n    topic: (ai && ai.topic) || 'Unsupported or unclear',\n    intent_confidence,\n    is_allowlisted,\n    is_sensitive,\n    source_found,\n    source_support_level: support,\n    customer_reply,\n    source_titles,\n    source_urls,\n    escalation_reason:\n      (ai && ai.escalation_reason) ||\n      (valid ? '' : problems.join('; ')),\n    ai_summary: (ai && ai.ai_summary) || '',\n    recommended_staff_action:\n      (ai && ai.recommended_staff_action) || '',\n    clickup_task_title:\n      (ai && ai.clickup_task_title) || '',\n    send_customer_reply:\n      ai && ai.send_customer_reply === false ? false : true,\n    final_route,\n  })\n};"
+      },
+      "id": "f8484a73-b732-43b1-a130-298f61cda41b",
+      "name": "Validate AI JSON Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2816,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.final_route }}",
+                    "rightValue": "AUTO_REPLY",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "91d5b4e4-5110-4b72-9e81-5eba30a5af30"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "auto_reply"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "escalate"
+        }
+      },
+      "id": "754a3424-82c4-4954-8b54-9121430b13ae",
+      "name": "Main Switch Router",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        3040,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const j = $json;\n\nconst WHATSAPP_PHONE_NUMBER_ID = 'WHATSAPP_PHONE_NUMBER_ID';\n\nconst GRAPH_FB = 'https://graph.facebook.com/v21.0';\nconst GRAPH_IG = 'https://graph.instagram.com/v21.0';\n\nlet url;\nlet body;\n\n// WhatsApp\nif (j.channel === 'WhatsApp') {\n\n  url = GRAPH_FB + '/' + WHATSAPP_PHONE_NUMBER_ID + '/messages';\n\n  body = {\n    messaging_product: 'whatsapp',\n    to: j.customer_id,\n    type: 'text',\n    text: {\n      body: j.customer_reply\n    }\n  };\n\n// Instagram\n} else if (j.channel === 'Instagram') {\n\n  url = GRAPH_IG + '/me/messages';\n\n  body = {\n    recipient: {\n      id: j.customer_id\n    },\n    message: {\n      text: j.customer_reply\n    }\n  };\n\n// Messenger\n} else if (j.channel === 'Messenger') {\n\n  url = GRAPH_FB + '/me/messages';\n\n  body = {\n    recipient: {\n      id: j.customer_id\n    },\n    messaging_type: 'RESPONSE',\n    message: {\n      text: j.customer_reply\n    }\n  };\n\n// Unknown channel\n} else {\n\n  throw new Error('Unsupported channel: ' + j.channel);\n\n}\n\nreturn {\n  json: {\n    ...j,\n    send_url: url,\n    send_body: body\n  }\n};\n"
+      },
+      "id": "51d28f6e-c5b9-4bed-aecb-e04d6532ddcc",
+      "name": "Prepare Auto-Reply Send",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3264,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "CONFIGURE_MESSAGE_LOG_DATA_TABLE_ID",
+          "cachedResultName": "message_log"
+        },
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "message_id",
+              "keyValue": "={{ $('Prepare Auto-Reply Send').item.json.message_id }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "message_id": "={{ $('Prepare Auto-Reply Send').item.json.message_id }}",
+            "conversation_id": "={{ $('Prepare Auto-Reply Send').item.json.conversation_id }}",
+            "customer_id": "={{ $('Prepare Auto-Reply Send').item.json.customer_id }}",
+            "channel": "={{ $('Prepare Auto-Reply Send').item.json.channel }}",
+            "event_timestamp": "={{ $('Prepare Auto-Reply Send').item.json.message_timestamp }}",
+            "original_message": "={{ $('Prepare Auto-Reply Send').item.json.customer_message }}",
+            "detected_intent": "={{ $('Prepare Auto-Reply Send').item.json.intent }}",
+            "topic": "={{ $('Prepare Auto-Reply Send').item.json.topic }}",
+            "confidence": "={{ $('Prepare Auto-Reply Send').item.json.intent_confidence }}",
+            "decision": "AUTO_REPLY",
+            "source_titles": "={{ ($('Prepare Auto-Reply Send').item.json.source_titles || []).join(', ') }}",
+            "source_urls": "={{ ($('Prepare Auto-Reply Send').item.json.source_urls || []).join(', ') }}",
+            "customer_reply": "={{ $('Prepare Auto-Reply Send').item.json.customer_reply }}",
+            "execution_id": "={{ $execution.id }}",
+            "reply_delivery_status": "sent"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "message_id",
+              "displayName": "message_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "conversation_id",
+              "displayName": "conversation_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "customer_id",
+              "displayName": "customer_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "channel",
+              "displayName": "channel",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "event_timestamp",
+              "displayName": "event_timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "original_message",
+              "displayName": "original_message",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "detected_intent",
+              "displayName": "detected_intent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "topic",
+              "displayName": "topic",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "confidence",
+              "displayName": "confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "decision",
+              "displayName": "decision",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "source_titles",
+              "displayName": "source_titles",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "source_urls",
+              "displayName": "source_urls",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "customer_reply",
+              "displayName": "customer_reply",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "escalation_reason",
+              "displayName": "escalation_reason",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "clickup_task_id",
+              "displayName": "clickup_task_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "execution_id",
+              "displayName": "execution_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "reply_delivery_status",
+              "displayName": "reply_delivery_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "7c0064b7-1c65-4a2c-b855-8323ad9164f5",
+      "name": "Interaction Logging (Auto-Reply)",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        4176,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const j = $json;\n\n// -------------------------\n// ACKNOWLEDGEMENT TEXT\n// -------------------------\n\nconst NORMAL_ACK =\n  \"Thank you for contacting us. Your message needs review by our support team, so it has been passed to the appropriate team member. They will follow up with you.\";\n\nconst UPSET_ACK =\n  \"I’m sorry to hear about your experience. I’ve passed your message and the details you shared to our support team for review. A team member will follow up with you.\";\n\n\n// -------------------------\n// DETECT TYPE\n// -------------------------\n\nconst reason = (j.escalation_reason || '').toLowerCase();\nconst topic = (j.topic || '').toLowerCase();\nconst intent = (j.intent || '').toLowerCase();\n\nconst blob = (\n  reason + ' ' +\n  topic + ' ' +\n  intent + ' ' +\n  (j.customer_message || '')\n).toLowerCase();\n\nconst isUpset =\n  /(complaint|angry|upset|furious|terrible|worst|scam|disappointed|unacceptable)/.test(blob);\n\nconst ack_text = isUpset ? UPSET_ACK : NORMAL_ACK;\n\n\n// -------------------------\n// CLICKUP PRIORITY\n// 1 = Urgent\n// 2 = High\n// 3 = Normal\n// -------------------------\n\nlet priority = 3;\n\nif (\n  /(legal|lawsuit|fraud|chargeback|payment dispute|severe complaint)/.test(blob)\n) {\n  priority = 1;\n} else if (\n  /(refund|return|order|payout|payment|authentication dispute|tracking|delivery|dispute)/.test(blob)\n) {\n  priority = 2;\n}\n\n\n// -------------------------\n// CHANNEL + CLICKUP DATA\n// -------------------------\n\nconst channel = j.channel;\n\nconst tags = [\n  'Meta Inbox',\n  'Escalation',\n  channel\n];\n\nif (j.topic) {\n  tags.push(j.topic);\n}\n\nconst title =\n  '[Meta Escalation] ' +\n  channel +\n  ' — ' +\n  (j.intent || 'unknown');\n\n\nconst titles = Array.isArray(j.source_titles)\n  ? j.source_titles.join(', ')\n  : '';\n\nconst urls = Array.isArray(j.source_urls)\n  ? j.source_urls.join(', ')\n  : '';\n\n\n// -------------------------\n// CLICKUP DESCRIPTION\n// -------------------------\n\nconst desc =\n  'Customer name:\\n' +\n  (j.customer_name || 'N/A') +\n\n  '\\n\\nCustomer ID:\\n' +\n  (j.customer_id || '') +\n\n  '\\n\\nChannel:\\n' +\n  channel +\n\n  '\\n\\nConversation ID:\\n' +\n  (j.conversation_id || '') +\n\n  '\\n\\nMessage ID:\\n' +\n  (j.message_id || '') +\n\n  '\\n\\nReceived at:\\n' +\n  (j.message_timestamp || '') +\n\n  '\\n\\nOriginal customer message:\\n' +\n  (j.customer_message || '') +\n\n  '\\n\\nDetected intent:\\n' +\n  (j.intent || '') +\n\n  '\\n\\nTopic:\\n' +\n  (j.topic || '') +\n\n  '\\n\\nAI confidence:\\n' +\n  (j.intent_confidence || '') +\n\n  '\\n\\nEscalation reason:\\n' +\n  (j.escalation_reason || '') +\n\n  '\\n\\nAI summary:\\n' +\n  (j.ai_summary || '') +\n\n  '\\n\\nRecommended staff action:\\n' +\n  (j.recommended_staff_action || '') +\n\n  '\\n\\nSources found:\\n' +\n  (titles || 'None') +\n\n  '\\n\\nSource URLs:\\n' +\n  (urls || 'None');\n\n\n// -------------------------\n// MESSAGE ROUTING\n// -------------------------\n\nconst WHATSAPP_PHONE_NUMBER_ID = 'WHATSAPP_PHONE_NUMBER_ID';\nconst INSTAGRAM_IG_USER_ID = 'INSTAGRAM_IG_USER_ID';\n\nconst GRAPH_FB = 'https://graph.facebook.com/v21.0';\nconst GRAPH_IG = 'https://graph.instagram.com/v21.0';\n\nlet url;\nlet body;\n\n\n// WhatsApp\nif (channel === 'WhatsApp') {\n\n  url =\n    GRAPH_FB +\n    '/' +\n    WHATSAPP_PHONE_NUMBER_ID +\n    '/messages';\n\n  body = {\n    messaging_product: 'whatsapp',\n    to: j.customer_id,\n    type: 'text',\n    text: {\n      body: ack_text\n    }\n  };\n\n\n// Instagram\n} else if (channel === 'Instagram') {\n\n  url =\n    GRAPH_IG +\n    '/' +\n    INSTAGRAM_IG_USER_ID +\n    '/messages';\n\n  body = {\n    recipient: {\n      id: j.customer_id\n    },\n    message: {\n      text: ack_text\n    }\n  };\n\n\n// Messenger\n} else if (channel === 'Messenger') {\n\n  url =\n    GRAPH_FB +\n    '/me/messages';\n\n  body = {\n    recipient: {\n      id: j.customer_id\n    },\n    messaging_type: 'RESPONSE',\n    message: {\n      text: ack_text\n    }\n  };\n\n\n// Unknown channel\n} else {\n\n  throw new Error(\n    'Unsupported channel: ' + channel\n  );\n}\n\n\n// -------------------------\n// OUTPUT\n// -------------------------\n\nreturn {\n  json: {\n    ...j,\n\n    ack_text: ack_text,\n\n    task_title: title,\n    task_description: desc,\n    task_priority: priority,\n    task_tags: tags,\n\n    send_ack:\n      j.send_customer_reply !== false,\n\n    ack_send_url: url,\n    ack_send_body: body\n  }\n};"
+      },
+      "id": "c0aafccf-50e3-4c35-9c20-18b26f3127e8",
+      "name": "Prepare Escalation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3216,
+        384
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "send_ack",
+              "leftValue": "={{ $json.send_ack }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "7d8f56af-e9d7-4990-a648-c12d27b39bee",
+      "name": "Send Acknowledgement?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3440,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "CONFIGURE_MESSAGE_LOG_DATA_TABLE_ID",
+          "cachedResultName": "message_log"
+        },
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "message_id",
+              "keyValue": "={{ $('Prepare Escalation').item.json.message_id }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "message_id": "{{ $('Prepare Escalation').item.json.message_id }}",
+            "conversation_id": "={{ $('Prepare Escalation').item.json.conversation_id }}",
+            "customer_id": "={{ $('Prepare Escalation').item.json.customer_id }}",
+            "channel": "={{ $('Prepare Escalation').item.json.channel }}",
+            "event_timestamp": "={{ $('Prepare Escalation').item.json.message_timestamp }}",
+            "original_message": "={{ $('Prepare Escalation').item.json.customer_message }}",
+            "detected_intent": "={{ $('Prepare Escalation').item.json.intent }}",
+            "topic": "={{ $('Prepare Escalation').item.json.topic }}",
+            "confidence": "={{ $('Prepare Escalation').item.json.intent_confidence }}",
+            "decision": "ESCALATE",
+            "source_titles": "={{ ($('Prepare Escalation').item.json.source_titles || []).join(', ') }}",
+            "source_urls": "={{ ($('Prepare Escalation').item.json.source_urls || []).join(', ') }}",
+            "escalation_reason": "={{ $('Prepare Escalation').item.json.escalation_reason }}",
+            "clickup_task_id": "={{ $json.id }}",
+            "execution_id": "={{ $execution.id }}",
+            "reply_delivery_status": "={{ $('Prepare Escalation').item.json.send_ack ? 'ack_required' : 'no_ack' }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "message_id",
+              "displayName": "message_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "conversation_id",
+              "displayName": "conversation_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "customer_id",
+              "displayName": "customer_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "channel",
+              "displayName": "channel",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "event_timestamp",
+              "displayName": "event_timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "original_message",
+              "displayName": "original_message",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "detected_intent",
+              "displayName": "detected_intent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "topic",
+              "displayName": "topic",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "confidence",
+              "displayName": "confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "decision",
+              "displayName": "decision",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "source_titles",
+              "displayName": "source_titles",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "source_urls",
+              "displayName": "source_urls",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "customer_reply",
+              "displayName": "customer_reply",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "escalation_reason",
+              "displayName": "escalation_reason",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "clickup_task_id",
+              "displayName": "clickup_task_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "execution_id",
+              "displayName": "execution_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "reply_delivery_status",
+              "displayName": "reply_delivery_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "0f2f4cfc-55c6-4b1d-8a29-c7c74e07c2b0",
+      "name": "Interaction Logging",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        3888,
+        928
+      ]
+    },
+    {
+      "parameters": {
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "CONFIGURE_MESSAGE_LOG_DATA_TABLE_ID",
+          "cachedResultName": "message_log"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "message_id": "={{ $('Error Handler').item.json.message_id }}",
+            "conversation_id": "={{ $('Error Handler').item.json.conversation_id }}",
+            "customer_id": "={{ $('Error Handler').item.json.customer_id }}",
+            "channel": "={{ $('Error Handler').item.json.channel }}",
+            "event_timestamp": "={{ $('Error Handler').item.json.message_timestamp }}",
+            "original_message": "={{ $('Error Handler').item.json.customer_message }}",
+            "detected_intent": "",
+            "topic": "",
+            "confidence": 0,
+            "decision": "WORKFLOW_ERROR",
+            "source_titles": "",
+            "source_urls": "",
+            "customer_reply": "",
+            "escalation_reason": "={{ $('Error Handler').item.json.error_message }}",
+            "clickup_task_id": "={{ $json.id }}",
+            "execution_id": "={{ $execution.id }}",
+            "reply_delivery_status": "={{ 'error: ' + $('Error Handler').item.json.failed_node }}"
+          },
+          "schema": [
+            {
+              "id": "message_id",
+              "displayName": "message_id",
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "conversation_id",
+              "displayName": "conversation_id",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "customer_id",
+              "displayName": "customer_id",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "channel",
+              "displayName": "channel",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "event_timestamp",
+              "displayName": "event_timestamp",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "original_message",
+              "displayName": "original_message",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "detected_intent",
+              "displayName": "detected_intent",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "topic",
+              "displayName": "topic",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "confidence",
+              "displayName": "confidence",
+              "type": "number",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "decision",
+              "displayName": "decision",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "source_titles",
+              "displayName": "source_titles",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "source_urls",
+              "displayName": "source_urls",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "customer_reply",
+              "displayName": "customer_reply",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "escalation_reason",
+              "displayName": "escalation_reason",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "clickup_task_id",
+              "displayName": "clickup_task_id",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "execution_id",
+              "displayName": "execution_id",
+              "type": "string",
+              "display": true,
+              "required": false
+            },
+            {
+              "id": "reply_delivery_status",
+              "displayName": "reply_delivery_status",
+              "type": "string",
+              "display": true,
+              "required": false
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "0020c58f-131e-4894-ab71-ee57c378cd85",
+      "name": "Error Log",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        5024,
+        608
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.clickup.com/api/v2/list/CONFIGURE_CLICKUP_LIST_ID/task",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "clickUpOAuth2Api",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "=name",
+              "value": "={{ $json.task_title }}"
+            },
+            {
+              "name": "description",
+              "value": "={{ $json.task_description }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        3408,
+        720
+      ],
+      "id": "1c77ce5b-ae59-475b-a6d4-f8fab492afa1",
+      "name": "Create ClickUp Escalation Task",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.clickup.com/api/v2/list/CONFIGURE_CLICKUP_LIST_ID/task",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "clickUpOAuth2Api",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "name",
+              "value": "={{ $json.error_task_title }}"
+            },
+            {
+              "name": "description",
+              "value": "={{ $json.error_task_description }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        4800,
+        608
+      ],
+      "id": "082bc4c0-433a-4deb-8074-6b0ef1e1ce2a",
+      "name": "Create Workflow Error Task"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "bda801cd-4cd5-4d1a-9250-c8243e83ab74",
+              "leftValue": "={{ !!$json.error }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        3568,
+        896
+      ],
+      "id": "9fad0c11-e748-4248-9491-1a39bfb0628f",
+      "name": "ClickUp Task Error?"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.channel }}",
+                    "rightValue": "Messenger",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "951a0182-fc23-4865-9389-f11145713feb"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "messenger"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "244d66a6-9c38-407c-920e-0cf6037fb4e0",
+                    "leftValue": "={{ $json.channel }}",
+                    "rightValue": "Instagram",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "instagram"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "494a98d7-abf3-4086-bf89-bf10dd7158ed",
+                    "leftValue": "={{ $json.channel }}",
+                    "rightValue": "WhatsApp",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "whatsapp"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        3424,
+        32
+      ],
+      "id": "7e5e231d-46a2-4d3d-9f0c-72f9ea1880f1",
+      "name": "Auto-Reply Channel Router"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.send_url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.send_body) }}",
+        "options": {}
+      },
+      "id": "263454df-fbd1-48b4-b2d9-37a6c998ba9d",
+      "name": "Messenger Auto-Reply Route",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        3808,
+        -80
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.send_url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.send_body) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        3904,
+        64
+      ],
+      "id": "0e1b7bd7-b84e-4ec8-bd5b-05a17d22dd2c",
+      "name": "Instagram Auto-Reply Route",
+      "disabled": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.channel }}",
+                    "rightValue": "Messenger",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "951a0182-fc23-4865-9389-f11145713feb"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "messenger"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "244d66a6-9c38-407c-920e-0cf6037fb4e0",
+                    "leftValue": "={{ $json.channel }}",
+                    "rightValue": "Instagram",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "instagram"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "494a98d7-abf3-4086-bf89-bf10dd7158ed",
+                    "leftValue": "={{ $json.channel }}",
+                    "rightValue": "WhatsApp",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "whatsapp"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        3680,
+        304
+      ],
+      "id": "ab7baac8-fc54-456b-b93f-04d0a56be5dc",
+      "name": "Human Ack Channel Router"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.ack_send_url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.ack_send_body) }}",
+        "options": {}
+      },
+      "id": "adf960d4-2a9c-48a3-80fc-d73b10a9ee51",
+      "name": "Messenger Acknowledgement Route",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        4240,
+        256
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.ack_send_url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.ack_send_body) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        4240,
+        448
+      ],
+      "id": "eee50ee7-96a7-4016-b66d-38ab91388f02",
+      "name": "Instagram Acknowledgement Route",
+      "disabled": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "071d41d0-da47-4ace-b9c0-270cae9b7f1d",
+              "leftValue": "={{\n  (\n    ($json.channel === 'Messenger' && String($json.customer_id) === 'CONFIGURE_MESSENGER_TEST_ID') ||\n    ($json.channel === 'Instagram' && String($json.customer_id) === 'CONFIGURE_INSTAGRAM_TEST_ID')\n  )\n  ? 'ALLOW'\n  : 'BLOCK'\n}}",
+              "rightValue": "ALLOW",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1328,
+        544
+      ],
+      "id": "bd0bd188-5617-4456-854a-82f42d6923dc",
+      "name": "TEST MODE - Allowed User?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "071d41d0-da47-4ace-b9c0-270cae9b7f1d",
+              "leftValue": "={{\n  (\n    ($json.channel === 'Messenger' && String($json.customer_id) === 'CONFIGURE_MESSENGER_TEST_ID') ||\n    ($json.channel === 'Instagram' && String($json.customer_id) === 'CONFIGURE_INSTAGRAM_TEST_ID')\n  )\n  ? 'ALLOW'\n  : 'BLOCK'\n}}",
+              "rightValue": "ALLOW",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        3600,
+        -64
+      ],
+      "id": "e45ee08b-6e98-4407-8596-e73358fa4599",
+      "name": "TEST SEND - Allowed User?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "071d41d0-da47-4ace-b9c0-270cae9b7f1d",
+              "leftValue": "={{\n  (\n    ($json.channel === 'Messenger' && String($json.customer_id) === 'CONFIGURE_MESSENGER_TEST_ID') ||\n    ($json.channel === 'Instagram' && String($json.customer_id) === 'CONFIGURE_INSTAGRAM_TEST_ID')\n  )\n  ? 'ALLOW'\n  : 'BLOCK'\n}}",
+              "rightValue": "=ALLOW",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        3904,
+        288
+      ],
+      "id": "46034e91-e421-4dea-8743-b4f622897f74",
+      "name": "TEST ACK - Allowed User?"
+    },
+    {
+      "parameters": {
+        "path": "CONFIGURE_WEBHOOK_PATH",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "987eaeec-4df9-46af-a789-f0f1d4c6677e",
+      "name": "Meta Webhook Verify GET",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        368,
+        1040
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "CONFIGURE_WEBHOOK_PATH",
+        "options": {}
+      },
+      "id": "2245a51d-691f-4470-8102-45ba3e0a3934",
+      "name": "Meta Webhook Messages POST",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        32,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "aeec59ea-1257-4dc1-a2cf-63b5f31e2f3e",
+              "leftValue": "={{ $json.query[\"hub.verify_token\"] }}",
+              "rightValue": "CONFIGURE_META_VERIFY_TOKEN",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            },
+            {
+              "id": "3c512e5b-984e-4a38-a76b-6ad05e7fd63e",
+              "leftValue": "={{ $json.query[\"hub.mode\"] }}",
+              "rightValue": "subscribe",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        592,
+        1040
+      ],
+      "id": "3f442682-272b-48f0-a8f8-80f27bac8616",
+      "name": "Verify Meta Token?"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.query[\"hub.challenge\"] }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        816,
+        944
+      ],
+      "id": "27abf993-371f-4590-8e99-2af343ce4638",
+      "name": "Meta Verify Success Response"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "Invalid verify token",
+        "options": {
+          "responseCode": 403
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        800,
+        1136
+      ],
+      "id": "688560ca-699e-4f50-8cb4-34e3ba71fcd9",
+      "name": "Meta Verify Failed Response"
+    },
+    {
+      "parameters": {
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "CONFIGURE_MESSAGE_LOG_DATA_TABLE_ID",
+          "cachedResultName": "message_log"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "message_id": "={{ $json.message_id }}",
+            "conversation_id": "={{ $json.conversation_id }}",
+            "customer_id": "={{ $json.customer_id }}",
+            "channel": "={{ $json.raw_channel }}",
+            "event_timestamp": "={{ $json.message_timestamp }}",
+            "original_message": "={{ $json.customer_message }}",
+            "confidence": 0
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "message_id",
+              "displayName": "message_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "conversation_id",
+              "displayName": "conversation_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "customer_id",
+              "displayName": "customer_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "channel",
+              "displayName": "channel",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "event_timestamp",
+              "displayName": "event_timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "original_message",
+              "displayName": "original_message",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "detected_intent",
+              "displayName": "detected_intent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "topic",
+              "displayName": "topic",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "confidence",
+              "displayName": "confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "decision",
+              "displayName": "decision",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "source_titles",
+              "displayName": "source_titles",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "source_urls",
+              "displayName": "source_urls",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "customer_reply",
+              "displayName": "customer_reply",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "escalation_reason",
+              "displayName": "escalation_reason",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "clickup_task_id",
+              "displayName": "clickup_task_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "execution_id",
+              "displayName": "execution_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "reply_delivery_status",
+              "displayName": "reply_delivery_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        880,
+        528
+      ],
+      "id": "5ad9b228-eff8-4050-8dc2-e66881646685",
+      "name": "Store message_id"
+    },
+    {
+      "parameters": {
+        "content": "Instagram routes are prepared but remain disabled and require account connection, credentials, and live testing by the receiving team."
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        4176,
+        752
+      ],
+      "typeVersion": 1,
+      "id": "a9141412-86cd-40ff-ad50-6fc01c1644b8",
+      "name": "Sticky Note3"
+    },
+    {
+      "parameters": {
+        "content": "META INBOX CUSTOMER SERVICE\nANONYMIZED PUBLIC TEMPLATE\n\nSECURITY\n- Company and client names have been removed.\n- Company domains and private API hosts have been removed.\n- Credential references have been removed.\n- API keys, access tokens, passwords and verification tokens are not included.\n- Meta test customer IDs are placeholders.\n- n8n Data Table IDs are placeholders.\n- ClickUp List IDs are placeholders.\n- Webhook IDs and original workflow/instance IDs are removed.\n- Original internal UUIDs have been regenerated.\n- Workflow is exported INACTIVE.\n\nBEFORE TESTING\n1. Reconnect your own OpenAI credentials.\n2. Reconnect your own Meta / Facebook credentials.\n3. Reconnect your own ClickUp credentials.\n4. Configure your CMS API host.\n5. Configure your ClickUp List ID.\n6. Create/connect the message_log Data Table.\n7. Configure your webhook path.\n8. Set a new private Meta verification token.\n9. Configure test customer IDs.\n10. Complete controlled testing before production use.\n\nIMPORTANT\nNever commit real API keys, access tokens, passwords, verification tokens,\nprivate customer IDs, or confidential company information to a public repository.\n",
+        "height": 816,
+        "width": 640
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        4544,
+        -304
+      ],
+      "typeVersion": 1,
+      "id": "943a2e1e-b46c-4d01-b350-8e4c09cc0a23",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "071d41d0-da47-4ace-b9c0-270cae9b7f1d",
+              "leftValue": "={{\n  (\n    ($json.channel === 'Messenger' && String($json.customer_id) === 'CONFIGURE_MESSENGER_TEST_ID') ||\n    ($json.channel === 'Instagram' && String($json.customer_id) === 'CONFIGURE_INSTAGRAM_TEST_ID')\n  )\n  ? 'ALLOW'\n  : 'BLOCK'\n}}",
+              "rightValue": "ALLOW",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        3664,
+        64
+      ],
+      "id": "f7830632-e9f2-4b21-a6a5-347008e4dfac",
+      "name": "TEST SEND - Allowed User?1"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "071d41d0-da47-4ace-b9c0-270cae9b7f1d",
+              "leftValue": "={{\n  (\n    ($json.channel === 'Messenger' && String($json.customer_id) === 'CONFIGURE_MESSENGER_TEST_ID') ||\n    ($json.channel === 'Instagram' && String($json.customer_id) === 'CONFIGURE_INSTAGRAM_TEST_ID')\n  )\n  ? 'ALLOW'\n  : 'BLOCK'\n}}",
+              "rightValue": "=ALLOW",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        4000,
+        416
+      ],
+      "id": "54279720-bf95-43e5-9e3b-7905490bb6c2",
+      "name": "TEST ACK - Allowed User?1"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Validate Event": {
+      "main": [
+        [
+          {
+            "node": "Ignore Business-Sent and Duplicate Messages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ignore Business-Sent and Duplicate Messages": {
+      "main": [
+        [
+          {
+            "node": "Dedup by message_id",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dedup by message_id": {
+      "main": [
+        [
+          {
+            "node": "Store message_id",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Channel and Message Fields": {
+      "main": [
+        [
+          {
+            "node": "TEST MODE - Allowed User?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Help Center Content": {
+      "main": [
+        [
+          {
+            "node": "Merge CMS Content",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Approved Policy Pages": {
+      "main": [
+        [
+          {
+            "node": "Merge CMS Content",
+            "type": "main",
+            "index": 1
+          }
+        ],
+        [
+          {
+            "node": "Error Handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Handler": {
+      "main": [
+        [
+          {
+            "node": "Create Workflow Error Task",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge CMS Content": {
+      "main": [
+        [
+          {
+            "node": "Clean and Prepare Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clean and Prepare Content": {
+      "main": [
+        [
+          {
+            "node": "Retrieve Relevant Approved Sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retrieve Relevant Approved Sources": {
+      "main": [
+        [
+          {
+            "node": "AI Classifier and Reply Generator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Classifier and Reply Generator": {
+      "main": [
+        [
+          {
+            "node": "Validate AI JSON Output",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Classifier and Reply Generator",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classification Schema": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "AI Classifier and Reply Generator",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate AI JSON Output": {
+      "main": [
+        [
+          {
+            "node": "Main Switch Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Main Switch Router": {
+      "main": [
+        [
+          {
+            "node": "Prepare Auto-Reply Send",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Escalation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Auto-Reply Send": {
+      "main": [
+        [
+          {
+            "node": "Auto-Reply Channel Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Escalation": {
+      "main": [
+        [
+          {
+            "node": "Send Acknowledgement?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Create ClickUp Escalation Task",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Acknowledgement?": {
+      "main": [
+        [
+          {
+            "node": "Human Ack Channel Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create ClickUp Escalation Task": {
+      "main": [
+        [
+          {
+            "node": "ClickUp Task Error?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Create Workflow Error Task": {
+      "main": [
+        [
+          {
+            "node": "Error Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ClickUp Task Error?": {
+      "main": [
+        [
+          {
+            "node": "Error Handler",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Interaction Logging",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Auto-Reply Channel Router": {
+      "main": [
+        [
+          {
+            "node": "TEST SEND - Allowed User?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "TEST SEND - Allowed User?1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Messenger Auto-Reply Route": {
+      "main": [
+        [
+          {
+            "node": "Interaction Logging (Auto-Reply)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Instagram Auto-Reply Route": {
+      "main": [
+        [
+          {
+            "node": "Interaction Logging (Auto-Reply)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Human Ack Channel Router": {
+      "main": [
+        [
+          {
+            "node": "TEST ACK - Allowed User?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "TEST ACK - Allowed User?1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Instagram Acknowledgement Route": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Error Handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Messenger Acknowledgement Route": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Error Handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "TEST MODE - Allowed User?": {
+      "main": [
+        [
+          {
+            "node": "Fetch Help Center Content",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch Approved Policy Pages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "TEST SEND - Allowed User?": {
+      "main": [
+        [
+          {
+            "node": "Messenger Auto-Reply Route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "TEST ACK - Allowed User?": {
+      "main": [
+        [
+          {
+            "node": "Messenger Acknowledgement Route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Meta Webhook Verify GET": {
+      "main": [
+        [
+          {
+            "node": "Verify Meta Token?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Meta Webhook Messages POST": {
+      "main": [
+        [
+          {
+            "node": "Validate Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Meta Token?": {
+      "main": [
+        [
+          {
+            "node": "Meta Verify Success Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Meta Verify Failed Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store message_id": {
+      "main": [
+        [
+          {
+            "node": "Normalize Channel and Message Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "TEST SEND - Allowed User?1": {
+      "main": [
+        [
+          {
+            "node": "Instagram Auto-Reply Route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "TEST ACK - Allowed User?1": {
+      "main": [
+        [
+          {
+            "node": "Instagram Acknowledgement Route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "nodeGroups": [],
+  "tags": []
+}
